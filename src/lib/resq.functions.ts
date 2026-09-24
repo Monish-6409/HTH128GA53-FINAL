@@ -39,7 +39,10 @@ export const ensureDemoCoordinator = createServerFn({ method: "POST" }).handler(
       email_confirm: true,
       user_metadata: { username: DEMO_USERNAME },
     });
-    if (error) throw new Error(error.message);
+    if (error) {
+      console.error("Demo coordinator setup failed:", error.message);
+      return { ok: false, error: error.message };
+    }
     user = created.user;
   }
   if (!user) return { ok: false };

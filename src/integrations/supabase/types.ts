@@ -94,6 +94,45 @@ export type Database = {
           },
         ]
       }
+      ai_provider_settings: {
+        Row: {
+          active: boolean
+          api_key: string | null
+          base_url: string | null
+          created_at: string
+          default_model: string | null
+          id: string
+          model_list: Json
+          name: string | null
+          slot: number
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          api_key?: string | null
+          base_url?: string | null
+          created_at?: string
+          default_model?: string | null
+          id?: string
+          model_list?: Json
+          name?: string | null
+          slot: number
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          api_key?: string | null
+          base_url?: string | null
+          created_at?: string
+          default_model?: string | null
+          id?: string
+          model_list?: Json
+          name?: string | null
+          slot?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
       emergency_requests: {
         Row: {
           contact: string | null

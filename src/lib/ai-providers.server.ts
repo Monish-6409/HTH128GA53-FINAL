@@ -27,14 +27,26 @@ export interface SlotConfig {
 
 export interface ProviderModelDetail {
   id: string;
-  object?: string;
-  created?: number | null;
-  owned_by?: string | null;
+  object: string;
+  created: number | null;
+  owned_by: string | null;
+  permission: string | null;
+  description: string | null;
+  context_window: number | null;
+  max_output_tokens: number | null;
+  pricing: Record<string, string> | null;
+}
+
+interface RawModel {
+  id?: unknown;
+  object?: unknown;
+  created?: unknown;
+  owned_by?: unknown;
   permission?: unknown;
-  description?: string | null;
-  context_window?: number | null;
-  max_output_tokens?: number | null;
-  pricing?: Record<string, unknown> | null;
+  description?: unknown;
+  context_window?: unknown;
+  max_output_tokens?: unknown;
+  pricing?: unknown;
 }
 
 export interface ProviderSettingsRow {
@@ -76,9 +88,16 @@ export function normalizeModelCatalog(payload: unknown): ProviderModelDetail[] {
 
   return data.flatMap((entry) => {
     if (!entry || typeof entry !== "object") return [];
-    const model = entry as Record<string, unknown>;
+    const model = entry as RawModel;
     const id = typeof model.id === "string" ? model.id.trim() : "";
     if (!id) return [];
+
+    let pricing: Record<string, string> | null = null;
+    if (model.pricing && typeof model.pricing === "object") {
+      pricing = Object.fromEntries(
+        Object.entries(model.pricing as Record<string, unknown>).map(([k, v]) => [k, String(v)]),
+      );
+    }
 
     return [
       {
@@ -86,7 +105,7 @@ export function normalizeModelCatalog(payload: unknown): ProviderModelDetail[] {
         object: typeof model.object === "string" ? model.object : "model",
         created: typeof model.created === "number" ? model.created : null,
         owned_by: typeof model.owned_by === "string" ? model.owned_by : null,
-        permission: model.permission ?? null,
+        permission: model.permission == null ? null : JSON.stringify(model.permission),
         description:
           typeof model.description === "string"
             ? model.description
@@ -96,7 +115,7 @@ export function normalizeModelCatalog(payload: unknown): ProviderModelDetail[] {
         context_window: typeof model.context_window === "number" ? model.context_window : null,
         max_output_tokens:
           typeof model.max_output_tokens === "number" ? model.max_output_tokens : null,
-        pricing: typeof model.pricing === "object" ? (model.pricing as Record<string, unknown>) : null,
+        pricing,
       },
     ];
   });
@@ -145,12 +164,12 @@ export async function discoverModelDetails(cfg: SlotConfig): Promise<ProviderMod
     const res = await fetch(`${cfg.baseUrl}/models`, {
       headers: { Authorization: `Bearer ${cfg.apiKey}` },
     });
-    if (!res.ok) return cfg.defaultModel ? [{ id: cfg.defaultModel }] : [];
+    if (!res.ok) return cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [];
     const json = (await res.json()) as unknown;
     const details = normalizeModelCatalog(json);
-    return details.length ? details : cfg.defaultModel ? [{ id: cfg.defaultModel }] : [];
+    return details.length ? details : cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [];
   } catch {
-    return cfg.defaultModel ? [{ id: cfg.defaultModel }] : [];
+    return cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [];
   }
 }
 
@@ -178,7 +197,7 @@ export async function validateProviderConnection(cfg: SlotConfig): Promise<{
         ok: false,
         baseUrl: cfg.baseUrl,
         name: cfg.name,
-        models: cfg.defaultModel ? [{ id: cfg.defaultModel }] : [],
+        models: cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [],
         error: `Provider rejected the key (${res.status}): ${body.slice(0, 300)}`,
       };
     }
@@ -189,14 +208,14 @@ export async function validateProviderConnection(cfg: SlotConfig): Promise<{
       ok: true,
       baseUrl: cfg.baseUrl,
       name: cfg.name,
-      models: models.length ? models : cfg.defaultModel ? [{ id: cfg.defaultModel }] : [],
+      models: models.length ? models : cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [],
     };
   } catch (error) {
     return {
       ok: false,
       baseUrl: cfg.baseUrl,
       name: cfg.name,
-      models: cfg.defaultModel ? [{ id: cfg.defaultModel }] : [],
+      models: cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [],
       error: error instanceof Error ? error.message : "Could not connect to provider.",
     };
   }
@@ -237,4 +256,18 @@ export async function completeChat(
     choices?: Array<{ message?: { content?: string } }>;
   };
   return json.choices?.[0]?.message?.content ?? "";
+}
+
+function fallbackModel(id: string): ProviderModelDetail {
+  return {
+    id,
+    object: "model",
+    created: null,
+    owned_by: null,
+    permission: null,
+    description: null,
+    context_window: null,
+    max_output_tokens: null,
+    pricing: null,
+  };
 }

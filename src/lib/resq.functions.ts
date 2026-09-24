@@ -2,9 +2,51 @@ import { createServerFn } from "@tanstack/react-start";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import { AGENTS, EMPTY_OUTPUT, type AgentName, type AgentStructuredOutput } from "./agent-schema";
 
-const DEMO_USERNAME = "umar";
-const DEMO_PASSWORD = "umar1234";
-export const USERNAME_DOMAIN = "resq.local";
+function isMissingTableError(error: unknown, tableName: string): boolean {
+  if (!error) return false;
+
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : String(error ?? "");
+  const lower = message.toLowerCase();
+
+  return (
+    lower.includes(`could not find the table 'public.${tableName}'`) ||
+    lower.includes(`relation "public.${tableName}" does not exist`) ||
+    lower.includes(`"public.${tableName}"`) && lower.includes("schema cache") ||
+    lower.includes(`table '${tableName}'`) && lower.includes("schema cache") ||
+    lower.includes(`public.${tableName}`) && lower.includes("does not exist")
+  );
+}
+
+export const resolveOfficerLogin = createServerFn({ method: "POST" })
+  .inputValidator((input: { email: string }) => ({
+    email: String(input.email ?? "").trim().toLowerCase(),
+  }))
+  .handler(async ({ data }) => {
+    if (!data.email) return null;
+
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+
+    const { data: profile, error } = await supabaseAdmin
+      .from("profiles")
+      .select("id, username, email, role")
+      .eq("email", data.email)
+      .maybeSingle();
+
+    if (error) {
+      console.error("Profile lookup failed during login:", error.message);
+      return null;
+    }
+
+    if (!profile || !profile.email || !profile.role) return null;
+    if (!["officer", "coordinator"].includes(profile.role)) return null;
+
+    return {
+      id: profile.id,
+      username: profile.username,
+      email: profile.email,
+      role: profile.role,
+    };
+  });
 
 /* ------------------------------------------------------------------ public */
 
@@ -23,37 +65,6 @@ export const getRequestStatus = createServerFn({ method: "POST" })
       .maybeSingle();
     return row ?? null;
   });
-
-/** Creates the seeded demo coordinator account the first time it is needed. */
-export const ensureDemoCoordinator = createServerFn({ method: "POST" }).handler(async () => {
-  const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-  const email = `${DEMO_USERNAME}@${USERNAME_DOMAIN}`;
-
-  const { data: list } = await supabaseAdmin.auth.admin.listUsers({ page: 1, perPage: 200 });
-  let user = list?.users.find((u) => u.email === email) ?? null;
-
-  if (!user) {
-    const { data: created, error } = await supabaseAdmin.auth.admin.createUser({
-      email,
-      password: DEMO_PASSWORD,
-      email_confirm: true,
-      user_metadata: { username: DEMO_USERNAME },
-    });
-    if (error) {
-      console.error("Demo coordinator setup failed:", error.message);
-      return { ok: false, error: error.message };
-    }
-    user = created.user;
-  }
-  if (!user) return { ok: false };
-
-  await supabaseAdmin.from("user_roles").upsert(
-    { user_id: user.id, role: "coordinator" },
-    { onConflict: "user_id,role" },
-  );
-  await supabaseAdmin.from("officers").update({ user_id: user.id }).eq("username", DEMO_USERNAME);
-  return { ok: true };
-});
 
 /* --------------------------------------------------------------- dashboard */
 
@@ -87,8 +98,19 @@ export const getProviderSlots = createServerFn({ method: "GET" })
     const { readAllSlots, discoverModels, discoverModelDetails, resolveProviderSelection } = await import(
       "./ai-providers.server",
     );
-    const { data: rows } = await context.supabase.from("ai_provider_settings").select("*").order("slot");
-    const rowsBySlot = new Map((rows ?? []).map((row) => [Number(row.slot), row]));
+
+    let rows: Array<Record<string, any>> = [];
+    try {
+      const result = await context.supabase.from("ai_provider_settings").select("*").order("slot");
+      rows = result.data ?? [];
+    } catch (error) {
+      if (!isMissingTableError(error, "ai_provider_settings")) {
+        throw error;
+      }
+      rows = [];
+    }
+
+    const rowsBySlot = new Map(rows.map((row) => [Number(row.slot), row]));
 
     const allSlots = readAllSlots().map((s) => {
       const row = rowsBySlot.get(s.slot);
@@ -185,11 +207,20 @@ export const saveProviderSettings = createServerFn({ method: "POST" })
     }
 
     const slot = Math.min(3, Math.max(1, data.slot));
-    const { data: currentRow } = await context.supabase
-      .from("ai_provider_settings")
-      .select("*")
-      .eq("slot", slot)
-      .maybeSingle();
+    let currentRow: Record<string, any> | null = null;
+    try {
+      const { data } = await context.supabase
+        .from("ai_provider_settings")
+        .select("*")
+        .eq("slot", slot)
+        .maybeSingle();
+      currentRow = data ?? null;
+    } catch (error) {
+      if (!isMissingTableError(error, "ai_provider_settings")) {
+        throw error;
+      }
+      currentRow = null;
+    }
 
     const normalizedName = data.name || currentRow?.name || `Provider slot ${slot}`;
     const normalizedBaseUrl = data.baseUrl || currentRow?.base_url || null;
@@ -197,25 +228,38 @@ export const saveProviderSettings = createServerFn({ method: "POST" })
     const normalizedDefaultModel = data.defaultModel || currentRow?.default_model || null;
 
     if (data.active) {
-      await context.supabase.from("ai_provider_settings").update({ active: false }).neq("slot", slot);
+      try {
+        await context.supabase.from("ai_provider_settings").update({ active: false }).neq("slot", slot);
+      } catch (error) {
+        if (!isMissingTableError(error, "ai_provider_settings")) {
+          throw error;
+        }
+      }
     }
 
-    const { error } = await context.supabase.from("ai_provider_settings").upsert(
-      {
-        slot,
-        name: normalizedName,
-        base_url: normalizedBaseUrl ? String(normalizedBaseUrl).trim().replace(/\/+$/, "") : null,
-        api_key: normalizedApiKey ? String(normalizedApiKey).trim() : null,
-        default_model: normalizedDefaultModel ? String(normalizedDefaultModel).trim() : null,
-        active: data.active,
-        model_list: [],
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "slot" },
-    );
+    try {
+      const { error } = await context.supabase.from("ai_provider_settings").upsert(
+        {
+          slot,
+          name: normalizedName,
+          base_url: normalizedBaseUrl ? String(normalizedBaseUrl).trim().replace(/\/+$/, "") : null,
+          api_key: normalizedApiKey ? String(normalizedApiKey).trim() : null,
+          default_model: normalizedDefaultModel ? String(normalizedDefaultModel).trim() : null,
+          active: data.active,
+          model_list: [],
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: "slot" },
+      );
 
-    if (error) throw new Error(error.message || "Could not save AI provider settings.");
-    return { ok: true };
+      if (error) throw new Error(error.message || "Could not save AI provider settings.");
+      return { ok: true };
+    } catch (error) {
+      if (isMissingTableError(error, "ai_provider_settings")) {
+        throw new Error("AI provider settings are not configured in the database yet. Apply the required Supabase migration to enable AI provider configuration.");
+      }
+      throw error;
+    }
   });
 
 export const addOfficer = createServerFn({ method: "POST" })
@@ -297,7 +341,17 @@ export const runCoordination = createServerFn({ method: "POST" })
 
     const { data: resources } = await supabase.from("resources").select("*");
     const { data: configs } = await supabase.from("agent_configs").select("*");
-    const { data: providerRows } = await supabase.from("ai_provider_settings").select("*");
+    const { data: providerRows, error: providerError } = await supabase.from("ai_provider_settings").select("*");
+
+    if (providerError && isMissingTableError(providerError, "ai_provider_settings")) {
+      return {
+        ok: true,
+        skipped: true,
+        reason: "AI provider settings are not configured in the database yet. Basic request processing is still available; AI coordination is skipped until the provider schema is applied.",
+      };
+    }
+    if (providerError) throw new Error(providerError.message || "Could not load AI provider settings.");
+
     const runtimeSelection = resolveProviderSelection(
       (providerRows ?? []).map((row) => ({
         slot: Number(row.slot),

@@ -31,7 +31,10 @@ function createSupabaseFetch(supabaseKey: string): typeof fetch {
 
 function createSupabaseAdminClient() {
   const SUPABASE_URL = process.env['SUPABASE_URL'];
-  const SUPABASE_SERVICE_ROLE_KEY = process.env['SUPABASE_SERVICE_ROLE_KEY'];
+  const SUPABASE_SERVICE_ROLE_KEY =
+    process.env['SUPABASE_SERVICE_ROLE_KEY'] ||
+    process.env['SUPABASE_SECRET_KEY'] ||
+    process.env['SUPABASE_PUBLISHABLE_KEY'];
 
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     const missing = [
@@ -41,6 +44,10 @@ function createSupabaseAdminClient() {
     const message = `Missing Supabase environment variable(s): ${missing.join(', ')}. Set your Supabase project URL and keys in the environment.`;
     console.error(`[Supabase] ${message}`);
     throw new Error(message);
+  }
+
+  if (!process.env['SUPABASE_SERVICE_ROLE_KEY']) {
+    console.warn('[Supabase] No SUPABASE_SERVICE_ROLE_KEY found. Falling back to the publishable key for local development; add the real service role secret for admin operations.');
   }
 
   return createClient<Database>(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {

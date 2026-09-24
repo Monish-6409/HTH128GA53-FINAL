@@ -1,7 +1,26 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
-import { ensureDemoCoordinator, USERNAME_DOMAIN } from "@/lib/resq.functions";
+import { resolveOfficerLogin } from "@/lib/resq.functions";
+
+function getSupabaseProjectWarning(): string | null {
+  const url = import.meta.env["VITE_SUPABASE_URL"] || process.env["SUPABASE_URL"];
+  const key =
+    import.meta.env["VITE_SUPABASE_PUBLISHABLE_KEY"] ||
+    process.env["SUPABASE_PUBLISHABLE_KEY"] ||
+    process.env["SUPABASE_ANON_KEY"] ||
+    process.env["NEXT_PUBLIC_SUPABASE_ANON_KEY"];
+
+  if (!url || !key) {
+    return "Supabase project is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY in your environment.";
+  }
+
+  if (!key.startsWith("sb_publishable_")) {
+    return "Supabase is configured with the wrong key type. Use the live project's anon/publishable key from the Supabase dashboard, not the service-role secret.";
+  }
+
+  return null;
+}
 
 export const Route = createFileRoute("/auth")({
   head: () => ({
@@ -19,29 +38,70 @@ export const Route = createFileRoute("/auth")({
 
 function AuthPage() {
   const navigate = useNavigate();
-  const [username, setUsername] = useState("umar");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    void ensureDemoCoordinator({ data: undefined }).catch(() => undefined);
-  }, []);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    const { error: signInError } = await supabase.auth.signInWithPassword({
-      email: `${username.trim().toLowerCase()}@${USERNAME_DOMAIN}`,
-      password,
-    });
-    setBusy(false);
-    if (signInError) {
-      setError("Incorrect username or password.");
+
+    const projectWarning = getSupabaseProjectWarning();
+    if (projectWarning) {
+      setError(projectWarning);
+      setBusy(false);
       return;
     }
-    void navigate({ to: "/command" });
+
+    const normalizedEmail = email.trim().toLowerCase();
+
+    try {
+      const account = await resolveOfficerLogin({ data: { email: normalizedEmail } });
+
+      if (!account || !account.email || !['officer', 'coordinator'].includes(account.role)) {
+        setError("Incorrect email or password.");
+        setBusy(false);
+        return;
+      }
+
+      const { data: authData, error: signInError } = await supabase.auth.signInWithPassword({
+        email: account.email,
+        password,
+      });
+
+      if (signInError || !authData.user) {
+        const message = signInError?.message?.toLowerCase().includes("api key")
+          ? "Supabase project configuration is invalid. Update the anon key in your environment to match the live project."
+          : "Incorrect email or password.";
+        setError(message);
+        setBusy(false);
+        return;
+      }
+
+      const { data: profile, error: profileError } = await supabase
+        .from("profiles")
+        .select("role")
+        .eq("id", authData.user.id)
+        .maybeSingle();
+
+      if (profileError || !profile || !['officer', 'coordinator'].includes(profile.role)) {
+        await supabase.auth.signOut();
+        setError("Incorrect email or password.");
+        setBusy(false);
+        return;
+      }
+
+      setBusy(false);
+      void navigate({ to: "/command" });
+    } catch (error) {
+      const message = error instanceof Error && /api key|invalid api/i.test(error.message)
+        ? "Supabase project configuration is invalid. Update the anon key in your environment to match the live project."
+        : "Incorrect email or password.";
+      setBusy(false);
+      setError(message);
+    }
   }
 
   return (
@@ -55,11 +115,12 @@ function AuthPage() {
           <h1 className="mt-1 text-xl font-semibold">Officer / Coordinator sign-in</h1>
           <form onSubmit={onSubmit} className="mt-5 grid gap-4">
             <label className="grid gap-1.5">
-              <span className="label-cap">Username</span>
+              <span className="label-cap">Email</span>
               <input
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoComplete="username"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                autoComplete="email"
                 className="w-full rounded-sm border border-input px-3 py-2 text-sm outline-none focus:border-ring focus:ring-1 focus:ring-ring"
               />
             </label>
@@ -82,7 +143,7 @@ function AuthPage() {
             </button>
           </form>
           <p className="mt-5 border-t border-border pt-4 text-xs text-muted-foreground">
-            MVP demo coordinator — username <b>umar</b>, password <b>umar1234</b>.
+            Use your registered officer or coordinator email and password.
           </p>
         </div>
       </div>

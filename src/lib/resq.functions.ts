@@ -204,9 +204,9 @@ export const saveProviderSettings = createServerFn({ method: "POST" })
       {
         slot,
         name: normalizedName,
-        base_url: normalizedBaseUrl,
-        api_key: normalizedApiKey,
-        default_model: normalizedDefaultModel,
+        base_url: normalizedBaseUrl ? String(normalizedBaseUrl).trim().replace(/\/+$/, "") : null,
+        api_key: normalizedApiKey ? String(normalizedApiKey).trim() : null,
+        default_model: normalizedDefaultModel ? String(normalizedDefaultModel).trim() : null,
         active: data.active,
         model_list: [],
         updated_at: new Date().toISOString(),
@@ -321,12 +321,16 @@ ${(resources ?? []).map((r) => `- ${r.name} | ${r.category} | ${r.available}/${r
       const cfg = configs?.find((c) => c.agent === agent.key);
       const selectedSlot = runtimeSelection?.slot ?? (cfg?.provider_slot ?? 1);
       const row = (providerRows ?? []).find((item) => Number(item.slot) === selectedSlot);
+      const fallbackSlot = readSlot(((selectedSlot as 1 | 2 | 3) ?? 1));
+      const baseUrl = String(row?.base_url ?? fallbackSlot.baseUrl ?? "").trim().replace(/\/+$/, "");
+      const apiKey = String(row?.api_key ?? fallbackSlot.apiKey ?? "").trim();
       const slotCfg = {
-        ...readSlot(((selectedSlot as 1 | 2 | 3) ?? 1)),
-        name: row?.name ?? readSlot(((selectedSlot as 1 | 2 | 3) ?? 1)).name,
-        baseUrl: row?.base_url ?? readSlot(((selectedSlot as 1 | 2 | 3) ?? 1)).baseUrl,
-        apiKey: row?.api_key ?? readSlot(((selectedSlot as 1 | 2 | 3) ?? 1)).apiKey,
-        defaultModel: row?.default_model ?? readSlot(((selectedSlot as 1 | 2 | 3) ?? 1)).defaultModel,
+        ...fallbackSlot,
+        name: row?.name ?? fallbackSlot.name,
+        baseUrl,
+        apiKey,
+        defaultModel: row?.default_model ?? fallbackSlot.defaultModel,
+        configured: Boolean(baseUrl && apiKey),
       };
       const model = runtimeSelection?.model || cfg?.model || row?.default_model || slotCfg.defaultModel;
       if (!slotCfg.configured || !model) {

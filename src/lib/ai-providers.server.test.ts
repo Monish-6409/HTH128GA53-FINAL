@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { normalizeModelCatalog, resolveProviderSelection } from "./ai-providers.server.ts";
+import { normalizeBaseUrl, normalizeModelCatalog, resolveProviderSelection } from "./ai-providers.server.ts";
 
 test("normalizeModelCatalog preserves model metadata and removes empty ids", () => {
   const result = normalizeModelCatalog({
@@ -28,4 +28,9 @@ test("resolveProviderSelection prefers the active slot and model when provided",
   );
 
   assert.deepEqual(selected, { slot: 2, model: "claude-3.5-sonnet" });
+});
+
+test("normalizeBaseUrl trims trailing slash so provider endpoints stay valid", () => {
+  assert.equal(normalizeBaseUrl("https://api.openai.com/v1/"), "https://api.openai.com/v1");
+  assert.equal(normalizeBaseUrl("http://localhost:11434/v1///"), "http://localhost:11434/v1");
 });

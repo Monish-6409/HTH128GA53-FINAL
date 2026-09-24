@@ -61,9 +61,13 @@ export interface ProviderSettingsRow {
 
 export const SLOTS: ProviderSlot[] = [1, 2, 3];
 
+export function normalizeBaseUrl(value: string): string {
+  return String(value ?? "").trim().replace(/\/+$/, "");
+}
+
 export function readSlot(slot: ProviderSlot): SlotConfig {
   const name = process.env[`AI_PROVIDER_${slot}_NAME`] ?? "";
-  const baseUrl = (process.env[`AI_PROVIDER_${slot}_BASE_URL`] ?? "").replace(/\/+$/, "");
+  const baseUrl = normalizeBaseUrl(process.env[`AI_PROVIDER_${slot}_BASE_URL`] ?? "");
   const apiKey = process.env[`AI_PROVIDER_${slot}_API_KEY`] ?? "";
   const defaultModel = process.env[`AI_PROVIDER_${slot}_MODEL`] ?? null;
   return {
@@ -146,7 +150,8 @@ export function resolveProviderSelection(
 export async function discoverModels(cfg: SlotConfig): Promise<string[]> {
   if (!cfg.configured) return cfg.defaultModel ? [cfg.defaultModel] : [];
   try {
-    const res = await fetch(`${cfg.baseUrl}/models`, {
+    const baseUrl = normalizeBaseUrl(cfg.baseUrl);
+    const res = await fetch(`${baseUrl}/models`, {
       headers: { Authorization: `Bearer ${cfg.apiKey}` },
     });
     if (!res.ok) return cfg.defaultModel ? [cfg.defaultModel] : [];
@@ -161,7 +166,8 @@ export async function discoverModels(cfg: SlotConfig): Promise<string[]> {
 export async function discoverModelDetails(cfg: SlotConfig): Promise<ProviderModelDetail[]> {
   if (!cfg.configured) return [];
   try {
-    const res = await fetch(`${cfg.baseUrl}/models`, {
+    const baseUrl = normalizeBaseUrl(cfg.baseUrl);
+    const res = await fetch(`${baseUrl}/models`, {
       headers: { Authorization: `Bearer ${cfg.apiKey}` },
     });
     if (!res.ok) return cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [];
@@ -185,7 +191,8 @@ export async function validateProviderConnection(cfg: SlotConfig): Promise<{
   }
 
   try {
-    const res = await fetch(`${cfg.baseUrl.replace(/\/+$/, "")}/models`, {
+    const baseUrl = normalizeBaseUrl(cfg.baseUrl);
+    const res = await fetch(`${baseUrl}/models`, {
       headers: {
         Authorization: `Bearer ${cfg.apiKey}`,
         "Content-Type": "application/json",
@@ -233,7 +240,8 @@ export async function completeChat(
       `AI provider slot ${cfg.slot} is not configured. Add its provider name, base URL and API key.`,
     );
   }
-  const res = await fetch(`${cfg.baseUrl}/chat/completions`, {
+  const baseUrl = normalizeBaseUrl(cfg.baseUrl);
+  const res = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${cfg.apiKey}`,

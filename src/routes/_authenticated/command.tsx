@@ -68,6 +68,8 @@ function Command() {
   const [notice, setNotice] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [providerPreset, setProviderPreset] = useState<string>("custom");
+  const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
+  const [providerBusy, setProviderBusy] = useState<"validate" | "save" | null>(null);
   const [providerForm, setProviderForm] = useState({
     slot: 1,
     name: "",
@@ -86,6 +88,7 @@ function Command() {
 
   const d = dash.data;
   const providerSlotInfo = (slots.data ?? []).find((s) => s.slot === providerForm.slot) ?? (slots.data ?? [])[0];
+  const modelOptions = Array.from(new Set([...discoveredModels, ...(providerSlotInfo?.models ?? [])]));
 
   useEffect(() => {
     if (!slots.data?.length) return;
@@ -335,8 +338,8 @@ function Command() {
                     onChange={(e) => setProviderForm((prev) => ({ ...prev, defaultModel: e.target.value }))}
                     className="rounded-sm border border-input bg-card px-2 py-2 text-sm"
                   >
-                    {!providerSlotInfo?.models?.length && <option value="">No models discovered yet</option>}
-                    {(providerSlotInfo?.models ?? []).map((model) => (
+                    {!modelOptions.length && <option value="">No models discovered yet</option>}
+                    {modelOptions.map((model) => (
                       <option key={model} value={model}>
                         {model}
                       </option>
@@ -346,7 +349,13 @@ function Command() {
                 <div className="flex items-end justify-end gap-2">
                   <button
                     type="button"
+                    disabled={providerBusy !== null}
                     onClick={async () => {
+                      if (!providerForm.baseUrl || !providerForm.apiKey) {
+                        setNotice("Enter a base URL and an API key before validating.");
+                        return;
+                      }
+                      setProviderBusy("validate");
                       try {
                         const result = await testProviderFn({
                           data: {
@@ -360,24 +369,32 @@ function Command() {
                           setNotice(result.error ?? "The provider key could not be validated.");
                           return;
                         }
-                        if (result.models.length) {
-                          setProviderForm((prev) => ({
-                            ...prev,
-                            defaultModel: prev.defaultModel || result.models[0]?.id || "",
-                          }));
-                          setNotice(`Validated successfully. ${result.models.length} model(s) discovered.`);
-                        }
+                        const ids = result.models.map((m) => m.id);
+                        setDiscoveredModels(ids);
+                        setProviderForm((prev) => ({
+                          ...prev,
+                          defaultModel: prev.defaultModel && ids.includes(prev.defaultModel) ? prev.defaultModel : ids[0] ?? "",
+                        }));
+                        setNotice(
+                          ids.length
+                            ? `Key validated. ${ids.length} model(s) discovered — pick one, then Save & activate.`
+                            : "Key validated, but the provider did not list any models.",
+                        );
                       } catch (err) {
                         setNotice(err instanceof Error ? err.message : "Could not validate AI provider.");
+                      } finally {
+                        setProviderBusy(null);
                       }
                     }}
-                    className="rounded-sm border border-border bg-card px-3 py-2 text-sm font-medium"
+                    className="rounded-sm border border-border bg-card px-3 py-2 text-sm font-medium disabled:opacity-50"
                   >
-                    Validate key
+                    {providerBusy === "validate" ? "Validating…" : "Validate key"}
                   </button>
                   <button
                     type="button"
+                    disabled={providerBusy !== null}
                     onClick={async () => {
+                      setProviderBusy("save");
                       try {
                         await saveProviderSettingsFn({
                           data: {
@@ -391,14 +408,17 @@ function Command() {
                         });
                         await queryClient.invalidateQueries({ queryKey: ["slots"] });
                         await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
-                        setNotice("AI provider configuration updated.");
+                        setProviderForm((prev) => ({ ...prev, apiKey: "" }));
+                        setNotice("AI provider saved and activated.");
                       } catch (err) {
                         setNotice(err instanceof Error ? err.message : "Could not update AI provider settings.");
+                      } finally {
+                        setProviderBusy(null);
                       }
                     }}
-                    className="rounded-sm bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground"
+                    className="rounded-sm bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-50"
                   >
-                    Save & activate
+                    {providerBusy === "save" ? "Saving…" : "Save & activate"}
                   </button>
                 </div>
               </div>

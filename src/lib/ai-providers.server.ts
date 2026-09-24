@@ -164,12 +164,12 @@ export async function discoverModelDetails(cfg: SlotConfig): Promise<ProviderMod
     const res = await fetch(`${cfg.baseUrl}/models`, {
       headers: { Authorization: `Bearer ${cfg.apiKey}` },
     });
-    if (!res.ok) return cfg.defaultModel ? [{ id: cfg.defaultModel }] : [];
+    if (!res.ok) return cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [];
     const json = (await res.json()) as unknown;
     const details = normalizeModelCatalog(json);
-    return details.length ? details : cfg.defaultModel ? [{ id: cfg.defaultModel }] : [];
+    return details.length ? details : cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [];
   } catch {
-    return cfg.defaultModel ? [{ id: cfg.defaultModel }] : [];
+    return cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [];
   }
 }
 
@@ -197,7 +197,7 @@ export async function validateProviderConnection(cfg: SlotConfig): Promise<{
         ok: false,
         baseUrl: cfg.baseUrl,
         name: cfg.name,
-        models: cfg.defaultModel ? [{ id: cfg.defaultModel }] : [],
+        models: cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [],
         error: `Provider rejected the key (${res.status}): ${body.slice(0, 300)}`,
       };
     }
@@ -208,14 +208,14 @@ export async function validateProviderConnection(cfg: SlotConfig): Promise<{
       ok: true,
       baseUrl: cfg.baseUrl,
       name: cfg.name,
-      models: models.length ? models : cfg.defaultModel ? [{ id: cfg.defaultModel }] : [],
+      models: models.length ? models : cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [],
     };
   } catch (error) {
     return {
       ok: false,
       baseUrl: cfg.baseUrl,
       name: cfg.name,
-      models: cfg.defaultModel ? [{ id: cfg.defaultModel }] : [],
+      models: cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [],
       error: error instanceof Error ? error.message : "Could not connect to provider.",
     };
   }
@@ -256,4 +256,18 @@ export async function completeChat(
     choices?: Array<{ message?: { content?: string } }>;
   };
   return json.choices?.[0]?.message?.content ?? "";
+}
+
+function fallbackModel(id: string): ProviderModelDetail {
+  return {
+    id,
+    object: "model",
+    created: null,
+    owned_by: null,
+    permission: null,
+    description: null,
+    context_window: null,
+    max_output_tokens: null,
+    pricing: null,
+  };
 }

@@ -90,6 +90,7 @@ function Command() {
   useEffect(() => {
     if (!slots.data?.length) return;
     const active = slots.data.find((s) => s.active) ?? slots.data[0];
+    if (!active) return;
     setProviderForm((prev) => ({
       ...prev,
       slot: active.slot,

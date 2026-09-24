@@ -38,6 +38,42 @@ export type Database = {
         }
         Relationships: []
       }
+      ai_provider_settings: {
+        Row: {
+          active: boolean
+          api_key: string | null
+          base_url: string | null
+          default_model: string | null
+          id: string
+          model_list: Json | null
+          name: string
+          slot: number
+          updated_at: string
+        }
+        Insert: {
+          active?: boolean
+          api_key?: string | null
+          base_url?: string | null
+          default_model?: string | null
+          id?: string
+          model_list?: Json | null
+          name?: string
+          slot: number
+          updated_at?: string
+        }
+        Update: {
+          active?: boolean
+          api_key?: string | null
+          base_url?: string | null
+          default_model?: string | null
+          id?: string
+          model_list?: Json | null
+          name?: string
+          slot?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
       agent_outputs: {
         Row: {
           agent: string

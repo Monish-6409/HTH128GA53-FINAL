@@ -1,0 +1,31 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import { normalizeModelCatalog, resolveProviderSelection } from "./ai-providers.server.ts";
+
+test("normalizeModelCatalog preserves model metadata and removes empty ids", () => {
+  const result = normalizeModelCatalog({
+    data: [
+      { id: "gpt-4o-mini", object: "model", created: 1720000000, owned_by: "openai" },
+      { id: "", object: "model", created: 1720000001 },
+      { id: "claude-3.5-sonnet", object: "model", owned_by: "anthropic" },
+    ],
+  });
+
+  assert.deepEqual(result.map((model) => model.id), ["gpt-4o-mini", "claude-3.5-sonnet"]);
+  assert.equal(result[0]?.owned_by, "openai");
+  assert.equal(result[1]?.owned_by, "anthropic");
+});
+
+test("resolveProviderSelection prefers the active slot and model when provided", () => {
+  const selected = resolveProviderSelection(
+    [
+      { slot: 1, active: false, default_model: "gpt-4o-mini" },
+      { slot: 2, active: true, default_model: "claude-3.5-sonnet" },
+      { slot: 3, active: false, default_model: "deepseek-r1" },
+    ],
+    { slot: 1, model: "grok-3" },
+  );
+
+  assert.deepEqual(selected, { slot: 2, model: "claude-3.5-sonnet" });
+});

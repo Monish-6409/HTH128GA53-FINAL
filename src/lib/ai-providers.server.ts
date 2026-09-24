@@ -22,6 +22,29 @@ export interface SlotConfig {
   apiKey: string;
   defaultModel: string | null;
   configured: boolean;
+  active?: boolean;
+}
+
+export interface ProviderModelDetail {
+  id: string;
+  object?: string;
+  created?: number | null;
+  owned_by?: string | null;
+  permission?: unknown;
+  description?: string | null;
+  context_window?: number | null;
+  max_output_tokens?: number | null;
+  pricing?: Record<string, unknown> | null;
+}
+
+export interface ProviderSettingsRow {
+  slot: number;
+  active?: boolean | null;
+  name?: string | null;
+  base_url?: string | null;
+  api_key?: string | null;
+  default_model?: string | null;
+  model_list?: unknown;
 }
 
 export const SLOTS: ProviderSlot[] = [1, 2, 3];
@@ -45,19 +68,137 @@ export function readAllSlots(): SlotConfig[] {
   return SLOTS.map(readSlot);
 }
 
-/** Model discovery — used when the provider exposes an OpenAI-style /models list. */
+/** Normalizes an OpenAI-compatible /models payload into a predictable list of models. */
+export function normalizeModelCatalog(payload: unknown): ProviderModelDetail[] {
+  const data = Array.isArray((payload as { data?: unknown[] } | undefined)?.data)
+    ? ((payload as { data?: unknown[] }).data ?? [])
+    : [];
+
+  return data.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const model = entry as Record<string, unknown>;
+    const id = typeof model.id === "string" ? model.id.trim() : "";
+    if (!id) return [];
+
+    return [
+      {
+        id,
+        object: typeof model.object === "string" ? model.object : "model",
+        created: typeof model.created === "number" ? model.created : null,
+        owned_by: typeof model.owned_by === "string" ? model.owned_by : null,
+        permission: model.permission ?? null,
+        description:
+          typeof model.description === "string"
+            ? model.description
+            : typeof model.description === "number"
+              ? String(model.description)
+              : null,
+        context_window: typeof model.context_window === "number" ? model.context_window : null,
+        max_output_tokens:
+          typeof model.max_output_tokens === "number" ? model.max_output_tokens : null,
+        pricing: typeof model.pricing === "object" ? (model.pricing as Record<string, unknown>) : null,
+      },
+    ];
+  });
+}
+
+export function resolveProviderSelection(
+  settings: Array<{ slot: number; active?: boolean | null; default_model?: string | null }>,
+  override?: { slot?: number; model?: string | null },
+): { slot: number; model: string } | null {
+  const active = settings.find((s) => s.active);
+  if (active) {
+    return {
+      slot: active.slot,
+      model: active.default_model ?? override?.model ?? "",
+    };
+  }
+
+  if (override && typeof override.slot === "number") {
+    return {
+      slot: override.slot,
+      model: override.model ?? "",
+    };
+  }
+
+  return null;
+}
+
 export async function discoverModels(cfg: SlotConfig): Promise<string[]> {
-  if (!cfg.configured) return [];
+  if (!cfg.configured) return cfg.defaultModel ? [cfg.defaultModel] : [];
   try {
     const res = await fetch(`${cfg.baseUrl}/models`, {
       headers: { Authorization: `Bearer ${cfg.apiKey}` },
     });
     if (!res.ok) return cfg.defaultModel ? [cfg.defaultModel] : [];
-    const json = (await res.json()) as { data?: Array<{ id?: string }> };
-    const ids = (json.data ?? []).map((m) => m.id).filter((id): id is string => Boolean(id));
+    const json = (await res.json()) as { data?: Array<Record<string, unknown>> };
+    const ids = normalizeModelCatalog(json).map((m) => m.id);
     return ids.length ? ids.sort() : cfg.defaultModel ? [cfg.defaultModel] : [];
   } catch {
     return cfg.defaultModel ? [cfg.defaultModel] : [];
+  }
+}
+
+export async function discoverModelDetails(cfg: SlotConfig): Promise<ProviderModelDetail[]> {
+  if (!cfg.configured) return [];
+  try {
+    const res = await fetch(`${cfg.baseUrl}/models`, {
+      headers: { Authorization: `Bearer ${cfg.apiKey}` },
+    });
+    if (!res.ok) return cfg.defaultModel ? [{ id: cfg.defaultModel }] : [];
+    const json = (await res.json()) as unknown;
+    const details = normalizeModelCatalog(json);
+    return details.length ? details : cfg.defaultModel ? [{ id: cfg.defaultModel }] : [];
+  } catch {
+    return cfg.defaultModel ? [{ id: cfg.defaultModel }] : [];
+  }
+}
+
+export async function validateProviderConnection(cfg: SlotConfig): Promise<{
+  ok: boolean;
+  baseUrl: string;
+  name: string;
+  models: ProviderModelDetail[];
+  error?: string;
+}> {
+  if (!cfg.baseUrl || !cfg.apiKey) {
+    return { ok: false, baseUrl: cfg.baseUrl, name: cfg.name, models: [], error: "Missing base URL or API key." };
+  }
+
+  try {
+    const res = await fetch(`${cfg.baseUrl.replace(/\/+$/, "")}/models`, {
+      headers: {
+        Authorization: `Bearer ${cfg.apiKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+    if (!res.ok) {
+      const body = await res.text();
+      return {
+        ok: false,
+        baseUrl: cfg.baseUrl,
+        name: cfg.name,
+        models: cfg.defaultModel ? [{ id: cfg.defaultModel }] : [],
+        error: `Provider rejected the key (${res.status}): ${body.slice(0, 300)}`,
+      };
+    }
+
+    const json = (await res.json()) as unknown;
+    const models = normalizeModelCatalog(json);
+    return {
+      ok: true,
+      baseUrl: cfg.baseUrl,
+      name: cfg.name,
+      models: models.length ? models : cfg.defaultModel ? [{ id: cfg.defaultModel }] : [],
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      baseUrl: cfg.baseUrl,
+      name: cfg.name,
+      models: cfg.defaultModel ? [{ id: cfg.defaultModel }] : [],
+      error: error instanceof Error ? error.message : "Could not connect to provider.",
+    };
   }
 }
 

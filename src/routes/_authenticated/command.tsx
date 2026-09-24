@@ -1,7 +1,7 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useServerFn } from "@tanstack/react-start";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { AGENTS } from "@/lib/agent-schema";
 import {
@@ -11,6 +11,8 @@ import {
   getRequestDetail,
   runCoordination,
   saveAgentConfig,
+  saveProviderSettings,
+  testProviderConnection,
 } from "@/lib/resq.functions";
 
 export const Route = createFileRoute("/_authenticated/command")({
@@ -38,6 +40,17 @@ const sevTone: Record<string, string> = {
   low: "bg-muted text-muted-foreground",
 };
 
+const PROVIDER_PRESETS = [
+  { id: "custom", label: "Custom provider", name: "Custom provider", baseUrl: "" },
+  { id: "openrouter", label: "OpenRouter", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" },
+  { id: "openai", label: "OpenAI", name: "OpenAI", baseUrl: "https://api.openai.com/v1" },
+  { id: "groq", label: "Groq", name: "Groq", baseUrl: "https://api.groq.com/openai/v1" },
+  { id: "together", label: "Together AI", name: "Together AI", baseUrl: "https://api.together.xyz/v1" },
+  { id: "gemini", label: "Google Gemini", name: "Gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai" },
+  { id: "deepseek", label: "DeepSeek", name: "DeepSeek", baseUrl: "https://api.deepseek.com" },
+  { id: "local", label: "Local OpenAI-compatible", name: "Local provider", baseUrl: "http://localhost:11434/v1" },
+] as const;
+
 function Command() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
@@ -47,11 +60,21 @@ function Command() {
   const runFn = useServerFn(runCoordination);
   const addOfficerFn = useServerFn(addOfficer);
   const saveConfigFn = useServerFn(saveAgentConfig);
+  const saveProviderSettingsFn = useServerFn(saveProviderSettings);
+  const testProviderFn = useServerFn(testProviderConnection);
 
   const [selected, setSelected] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
+  const [providerPreset, setProviderPreset] = useState<string>("custom");
+  const [providerForm, setProviderForm] = useState({
+    slot: 1,
+    name: "",
+    baseUrl: "",
+    apiKey: "",
+    defaultModel: "",
+  });
 
   const dash = useQuery({ queryKey: ["dashboard"], queryFn: () => dashboardFn({}) });
   const slots = useQuery({ queryKey: ["slots"], queryFn: () => slotsFn({}) });
@@ -62,6 +85,19 @@ function Command() {
   });
 
   const d = dash.data;
+  const providerSlotInfo = (slots.data ?? []).find((s) => s.slot === providerForm.slot) ?? (slots.data ?? [])[0];
+
+  useEffect(() => {
+    if (!slots.data?.length) return;
+    const active = slots.data.find((s) => s.active) ?? slots.data[0];
+    setProviderForm((prev) => ({
+      ...prev,
+      slot: active.slot,
+      name: active.name,
+      baseUrl: active.baseUrl ?? "",
+      defaultModel: active.defaultModel ?? "",
+    }));
+  }, [slots.data]);
 
   async function signOut() {
     await queryClient.cancelQueries();
@@ -204,6 +240,205 @@ function Command() {
               })}
             </div>
           </div>
+        </section>
+
+        <section className="panel p-5">
+          <div className="flex items-center justify-between gap-3">
+            <h2 className="text-base font-semibold">AI provider settings</h2>
+            <span className="text-xs text-muted-foreground">
+              Active for all AI replies: {providerSlotInfo?.name ?? "Not selected"}
+            </span>
+          </div>
+
+          {d?.isCoordinator ? (
+            <>
+                      <div className="mt-4 grid gap-3 md:grid-cols-2">
+                <label className="grid gap-1.5">
+                  <span className="label-cap">Provider preset</span>
+                  <select
+                    value={providerPreset}
+                    onChange={(e) => {
+                      const preset = PROVIDER_PRESETS.find((p) => p.id === e.target.value);
+                      if (!preset) return;
+                      setProviderPreset(preset.id);
+                      setProviderForm((prev) => ({
+                        ...prev,
+                        name: preset.name,
+                        baseUrl: preset.baseUrl,
+                      }));
+                    }}
+                    className="rounded-sm border border-input bg-card px-2 py-2 text-sm"
+                  >
+                    {PROVIDER_PRESETS.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="label-cap">Provider slot</span>
+                  <select
+                    value={providerForm.slot}
+                    onChange={(e) => {
+                      const nextSlot = Number(e.target.value);
+                      const nextProvider = (slots.data ?? []).find((s) => s.slot === nextSlot) ?? (slots.data ?? [])[0];
+                      setProviderForm((prev) => ({
+                        ...prev,
+                        slot: nextSlot,
+                        name: nextProvider?.name ?? prev.name,
+                        baseUrl: nextProvider?.baseUrl ?? "",
+                        defaultModel: nextProvider?.defaultModel ?? "",
+                      }));
+                    }}
+                    className="rounded-sm border border-input bg-card px-2 py-2 text-sm"
+                  >
+                    {(slots.data ?? []).map((s) => (
+                      <option key={s.slot} value={s.slot}>
+                        Slot {s.slot} · {s.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="label-cap">Display name</span>
+                  <input
+                    value={providerForm.name}
+                    onChange={(e) => setProviderForm((prev) => ({ ...prev, name: e.target.value }))}
+                    className="rounded-sm border border-input bg-card px-2 py-2 text-sm"
+                  />
+                </label>
+                <label className="grid gap-1.5 md:col-span-2">
+                  <span className="label-cap">Base URL</span>
+                  <input
+                    value={providerForm.baseUrl}
+                    onChange={(e) => setProviderForm((prev) => ({ ...prev, baseUrl: e.target.value }))}
+                    className="rounded-sm border border-input bg-card px-2 py-2 text-sm font-mono"
+                    placeholder="https://openrouter.ai/api/v1"
+                  />
+                </label>
+                <label className="grid gap-1.5 md:col-span-2">
+                  <span className="label-cap">API key</span>
+                  <input
+                    type="password"
+                    value={providerForm.apiKey}
+                    onChange={(e) => setProviderForm((prev) => ({ ...prev, apiKey: e.target.value }))}
+                    className="rounded-sm border border-input bg-card px-2 py-2 text-sm font-mono"
+                    placeholder="Paste a provider API key to scan and activate"
+                  />
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="label-cap">Selected model</span>
+                  <select
+                    value={providerForm.defaultModel}
+                    onChange={(e) => setProviderForm((prev) => ({ ...prev, defaultModel: e.target.value }))}
+                    className="rounded-sm border border-input bg-card px-2 py-2 text-sm"
+                  >
+                    {!providerSlotInfo?.models?.length && <option value="">No models discovered yet</option>}
+                    {(providerSlotInfo?.models ?? []).map((model) => (
+                      <option key={model} value={model}>
+                        {model}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="flex items-end justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        const result = await testProviderFn({
+                          data: {
+                            slot: providerForm.slot,
+                            name: providerForm.name,
+                            baseUrl: providerForm.baseUrl,
+                            apiKey: providerForm.apiKey,
+                          },
+                        });
+                        if (!result.ok) {
+                          setNotice(result.error ?? "The provider key could not be validated.");
+                          return;
+                        }
+                        if (result.models.length) {
+                          setProviderForm((prev) => ({
+                            ...prev,
+                            defaultModel: prev.defaultModel || result.models[0]?.id || "",
+                          }));
+                          setNotice(`Validated successfully. ${result.models.length} model(s) discovered.`);
+                        }
+                      } catch (err) {
+                        setNotice(err instanceof Error ? err.message : "Could not validate AI provider.");
+                      }
+                    }}
+                    className="rounded-sm border border-border bg-card px-3 py-2 text-sm font-medium"
+                  >
+                    Validate key
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await saveProviderSettingsFn({
+                          data: {
+                            slot: providerForm.slot,
+                            name: providerForm.name,
+                            baseUrl: providerForm.baseUrl,
+                            apiKey: providerForm.apiKey,
+                            defaultModel: providerForm.defaultModel,
+                            active: true,
+                          },
+                        });
+                        await queryClient.invalidateQueries({ queryKey: ["slots"] });
+                        await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+                        setNotice("AI provider configuration updated.");
+                      } catch (err) {
+                        setNotice(err instanceof Error ? err.message : "Could not update AI provider settings.");
+                      }
+                    }}
+                    className="rounded-sm bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground"
+                  >
+                    Save & activate
+                  </button>
+                </div>
+              </div>
+
+              {providerSlotInfo?.modelDetails?.length ? (
+                <div className="mt-4 rounded-md border border-border bg-card p-3">
+                  <p className="label-cap">Detected models</p>
+                  <div className="mt-2 grid gap-2 md:grid-cols-2">
+                    {(providerSlotInfo.modelDetails ?? []).map((model) => (
+                      <button
+                        type="button"
+                        key={model.id}
+                        onClick={() => setProviderForm((prev) => ({ ...prev, defaultModel: model.id }))}
+                        className={`rounded-sm border p-2 text-left text-xs ${
+                          providerForm.defaultModel === model.id
+                            ? "border-primary bg-primary/10"
+                            : "border-border bg-background"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold">{model.id}</span>
+                          {model.owned_by && <span className="text-muted-foreground">{model.owned_by}</span>}
+                        </div>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          {model.description ?? model.object ?? "Compatible model"}
+                        </p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : (
+                <p className="mt-3 text-xs text-muted-foreground">
+                  Add a valid API key and save to scan the provider catalog for available models.
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="mt-3 text-sm text-muted-foreground">
+              Only the coordinator can edit AI provider keys and the live default model.
+            </p>
+          )}
         </section>
 
         <section className="panel p-5">

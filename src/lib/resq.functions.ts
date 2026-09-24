@@ -80,21 +80,142 @@ export const getDashboard = createServerFn({ method: "GET" })
     };
   });
 
-/** Provider slot status + discovered models. API keys are never returned. */
+/** Provider slot status + discovered models. API keys are never returned to the browser. */
 export const getProviderSlots = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
-  .handler(async () => {
-    const { readAllSlots, discoverModels } = await import("./ai-providers.server");
-    const slots = readAllSlots();
-    return Promise.all(
-      slots.map(async (s) => ({
-        slot: s.slot,
-        name: s.name,
-        configured: s.configured,
-        defaultModel: s.defaultModel,
-        models: await discoverModels(s),
-      })),
+  .handler(async ({ context }) => {
+    const { readAllSlots, discoverModels, discoverModelDetails, resolveProviderSelection } = await import(
+      "./ai-providers.server",
     );
+    const { data: rows } = await context.supabase.from("ai_provider_settings").select("*").order("slot");
+    const rowsBySlot = new Map((rows ?? []).map((row) => [Number(row.slot), row]));
+
+    const allSlots = readAllSlots().map((s) => {
+      const row = rowsBySlot.get(s.slot);
+      return {
+        ...s,
+        name: row?.name ?? s.name,
+        baseUrl: row?.base_url ?? s.baseUrl,
+        apiKey: row?.api_key ?? s.apiKey,
+        defaultModel: row?.default_model ?? s.defaultModel,
+        configured: Boolean((row?.base_url ?? s.baseUrl) && (row?.api_key ?? s.apiKey)),
+        active: Boolean(row?.active),
+      };
+    });
+
+    const activeSelection = resolveProviderSelection(
+      allSlots.map((slot) => ({ slot: slot.slot, active: slot.active, default_model: slot.defaultModel })),
+    );
+
+    return Promise.all(
+      allSlots.map(async (s) => {
+        const details = await discoverModelDetails(s);
+        const models = await discoverModels(s);
+        return {
+          slot: s.slot,
+          name: s.name,
+          baseUrl: s.baseUrl,
+          configured: s.configured,
+          active: s.active || (!!activeSelection && activeSelection.slot === s.slot),
+          defaultModel: s.defaultModel,
+          modelCount: details.length,
+          models,
+          modelDetails: details,
+        };
+      }),
+    );
+  });
+
+export const testProviderConnection = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { slot: number; name: string; baseUrl: string; apiKey: string }) => ({
+    slot: Number(input.slot ?? 1),
+    name: String(input.name ?? "").trim(),
+    baseUrl: String(input.baseUrl ?? "").trim(),
+    apiKey: String(input.apiKey ?? "").trim(),
+  }))
+  .handler(async ({ data, context }) => {
+    const { data: roleRes } = await context.supabase
+      .from("user_roles")
+      .select("role")
+      .eq("user_id", context.userId);
+    if (!roleRes?.some((row) => row.role === "coordinator")) {
+      throw new Error("Only the coordinator can validate AI provider keys.");
+    }
+
+    const { validateProviderConnection } = await import("./ai-providers.server");
+    const result = await validateProviderConnection({
+      slot: Math.min(3, Math.max(1, data.slot)) as 1 | 2 | 3,
+      name: data.name || `Provider slot ${Math.min(3, Math.max(1, data.slot))}`,
+      baseUrl: data.baseUrl,
+      apiKey: data.apiKey,
+      defaultModel: null,
+      configured: Boolean(data.baseUrl && data.apiKey),
+    });
+
+    return { ok: result.ok, models: result.models, error: result.error ?? null };
+  });
+
+export const saveProviderSettings = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator(
+    (input: {
+      slot: number;
+      name: string;
+      baseUrl: string;
+      apiKey: string;
+      defaultModel: string;
+      active: boolean;
+    }) => ({
+      slot: Number(input.slot ?? 1),
+      name: String(input.name ?? "").trim(),
+      baseUrl: String(input.baseUrl ?? "").trim(),
+      apiKey: String(input.apiKey ?? "").trim(),
+      defaultModel: String(input.defaultModel ?? "").trim(),
+      active: Boolean(input.active),
+    }),
+  )
+  .handler(async ({ data, context }) => {
+    const { data: roleRes } = await context.supabase
+      .from("user_roles")
+      .select("role")
+      .eq("user_id", context.userId);
+    if (!roleRes?.some((row) => row.role === "coordinator")) {
+      throw new Error("Only the coordinator can change AI provider settings.");
+    }
+
+    const slot = Math.min(3, Math.max(1, data.slot));
+    const { data: currentRow } = await context.supabase
+      .from("ai_provider_settings")
+      .select("*")
+      .eq("slot", slot)
+      .maybeSingle();
+
+    const normalizedName = data.name || currentRow?.name || `Provider slot ${slot}`;
+    const normalizedBaseUrl = data.baseUrl || currentRow?.base_url || null;
+    const normalizedApiKey = data.apiKey || currentRow?.api_key || null;
+    const normalizedDefaultModel = data.defaultModel || currentRow?.default_model || null;
+
+    if (data.active) {
+      await context.supabase.from("ai_provider_settings").update({ active: false }).neq("slot", slot);
+    }
+
+    const { error } = await context.supabase.from("ai_provider_settings").upsert(
+      {
+        slot,
+        name: normalizedName,
+        base_url: normalizedBaseUrl,
+        api_key: normalizedApiKey,
+        default_model: normalizedDefaultModel,
+        active: data.active,
+        model_list: [],
+        updated_at: new Date().toISOString(),
+      },
+      { onConflict: "slot" },
+    );
+
+    if (error) throw new Error(error.message || "Could not save AI provider settings.");
+    return { ok: true };
   });
 
 export const addOfficer = createServerFn({ method: "POST" })
@@ -165,7 +286,7 @@ export const runCoordination = createServerFn({ method: "POST" })
   .inputValidator((input: { requestId: string }) => ({ requestId: String(input.requestId) }))
   .handler(async ({ data, context }) => {
     const { supabase } = context;
-    const { readSlot, completeChat } = await import("./ai-providers.server");
+    const { readSlot, completeChat, resolveProviderSelection } = await import("./ai-providers.server");
 
     const { data: req } = await supabase
       .from("emergency_requests")
@@ -176,6 +297,14 @@ export const runCoordination = createServerFn({ method: "POST" })
 
     const { data: resources } = await supabase.from("resources").select("*");
     const { data: configs } = await supabase.from("agent_configs").select("*");
+    const { data: providerRows } = await supabase.from("ai_provider_settings").select("*");
+    const runtimeSelection = resolveProviderSelection(
+      (providerRows ?? []).map((row) => ({
+        slot: Number(row.slot),
+        active: Boolean(row.active),
+        default_model: typeof row.default_model === "string" ? row.default_model : null,
+      })),
+    );
 
     const incident = `INCIDENT ${req.ref_code}
 Type: ${req.emergency_type} | Severity: ${req.severity} | People affected: ${req.people_count}
@@ -190,11 +319,19 @@ ${(resources ?? []).map((r) => `- ${r.name} | ${r.category} | ${r.available}/${r
 
     for (const agent of AGENTS) {
       const cfg = configs?.find((c) => c.agent === agent.key);
-      const slotCfg = readSlot(((cfg?.provider_slot ?? 1) as 1 | 2 | 3));
-      const model = cfg?.model || slotCfg.defaultModel;
+      const selectedSlot = runtimeSelection?.slot ?? (cfg?.provider_slot ?? 1);
+      const row = (providerRows ?? []).find((item) => Number(item.slot) === selectedSlot);
+      const slotCfg = {
+        ...readSlot(((selectedSlot as 1 | 2 | 3) ?? 1)),
+        name: row?.name ?? readSlot(((selectedSlot as 1 | 2 | 3) ?? 1)).name,
+        baseUrl: row?.base_url ?? readSlot(((selectedSlot as 1 | 2 | 3) ?? 1)).baseUrl,
+        apiKey: row?.api_key ?? readSlot(((selectedSlot as 1 | 2 | 3) ?? 1)).apiKey,
+        defaultModel: row?.default_model ?? readSlot(((selectedSlot as 1 | 2 | 3) ?? 1)).defaultModel,
+      };
+      const model = runtimeSelection?.model || cfg?.model || row?.default_model || slotCfg.defaultModel;
       if (!slotCfg.configured || !model) {
         throw new Error(
-          `${agent.label} has no usable AI provider. Configure provider slot ${slotCfg.slot} and pick a model.`,
+          `${agent.label} has no usable AI provider. Configure the active provider slot and pick a model.`,
         );
       }
 

@@ -27,14 +27,26 @@ export interface SlotConfig {
 
 export interface ProviderModelDetail {
   id: string;
-  object?: string;
-  created?: number | null;
-  owned_by?: string | null;
+  object: string;
+  created: number | null;
+  owned_by: string | null;
+  permission: string | null;
+  description: string | null;
+  context_window: number | null;
+  max_output_tokens: number | null;
+  pricing: Record<string, string> | null;
+}
+
+interface RawModel {
+  id?: unknown;
+  object?: unknown;
+  created?: unknown;
+  owned_by?: unknown;
   permission?: unknown;
-  description?: string | null;
-  context_window?: number | null;
-  max_output_tokens?: number | null;
-  pricing?: Record<string, unknown> | null;
+  description?: unknown;
+  context_window?: unknown;
+  max_output_tokens?: unknown;
+  pricing?: unknown;
 }
 
 export interface ProviderSettingsRow {
@@ -76,9 +88,16 @@ export function normalizeModelCatalog(payload: unknown): ProviderModelDetail[] {
 
   return data.flatMap((entry) => {
     if (!entry || typeof entry !== "object") return [];
-    const model = entry as Record<string, unknown>;
+    const model = entry as RawModel;
     const id = typeof model.id === "string" ? model.id.trim() : "";
     if (!id) return [];
+
+    let pricing: Record<string, string> | null = null;
+    if (model.pricing && typeof model.pricing === "object") {
+      pricing = Object.fromEntries(
+        Object.entries(model.pricing as Record<string, unknown>).map(([k, v]) => [k, String(v)]),
+      );
+    }
 
     return [
       {
@@ -86,7 +105,7 @@ export function normalizeModelCatalog(payload: unknown): ProviderModelDetail[] {
         object: typeof model.object === "string" ? model.object : "model",
         created: typeof model.created === "number" ? model.created : null,
         owned_by: typeof model.owned_by === "string" ? model.owned_by : null,
-        permission: model.permission ?? null,
+        permission: model.permission == null ? null : JSON.stringify(model.permission),
         description:
           typeof model.description === "string"
             ? model.description
@@ -96,7 +115,7 @@ export function normalizeModelCatalog(payload: unknown): ProviderModelDetail[] {
         context_window: typeof model.context_window === "number" ? model.context_window : null,
         max_output_tokens:
           typeof model.max_output_tokens === "number" ? model.max_output_tokens : null,
-        pricing: typeof model.pricing === "object" ? (model.pricing as Record<string, unknown>) : null,
+        pricing,
       },
     ];
   });

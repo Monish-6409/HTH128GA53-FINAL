@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { ensureContentTypeHeader } from "./response-guard.ts";
 import { normalizeBaseUrl, normalizeModelCatalog, resolveProviderSelection } from "./ai-providers.server.ts";
 
 test("normalizeModelCatalog preserves model metadata and removes empty ids", () => {
@@ -33,4 +34,11 @@ test("resolveProviderSelection prefers the active slot and model when provided",
 test("normalizeBaseUrl trims trailing slash so provider endpoints stay valid", () => {
   assert.equal(normalizeBaseUrl("https://api.openai.com/v1/"), "https://api.openai.com/v1");
   assert.equal(normalizeBaseUrl("http://localhost:11434/v1///"), "http://localhost:11434/v1");
+});
+
+test("ensureContentTypeHeader adds a content-type header when the Response is missing one", async () => {
+  const response = await ensureContentTypeHeader(new Response("{}"));
+
+  assert.equal(response.headers.get("content-type"), "text/plain;charset=UTF-8");
+  assert.equal(await response.text(), "{}");
 });

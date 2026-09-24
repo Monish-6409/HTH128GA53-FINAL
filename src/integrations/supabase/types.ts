@@ -14,6 +14,30 @@ export type Database = {
   }
   public: {
     Tables: {
+      agent_configs: {
+        Row: {
+          agent: string
+          id: string
+          model: string | null
+          provider_slot: number
+          updated_at: string
+        }
+        Insert: {
+          agent: string
+          id?: string
+          model?: string | null
+          provider_slot?: number
+          updated_at?: string
+        }
+        Update: {
+          agent?: string
+          id?: string
+          model?: string | null
+          provider_slot?: number
+          updated_at?: string
+        }
+        Relationships: []
+      }
       agent_outputs: {
         Row: {
           agent: string

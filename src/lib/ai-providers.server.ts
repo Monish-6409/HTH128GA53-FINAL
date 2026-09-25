@@ -65,6 +65,53 @@ export function normalizeBaseUrl(value: string): string {
   return String(value ?? "").trim().replace(/\/+$/, "");
 }
 
+export function inferProviderKind(baseUrl: string, fallbackName?: string): "openrouter" | "openai" | "openai-compatible" {
+  const normalizedUrl = normalizeBaseUrl(baseUrl ?? "").toLowerCase();
+  const normalizedName = (fallbackName ?? "").toLowerCase();
+
+  if (normalizedUrl.includes("openrouter.ai") || normalizedName.includes("openrouter")) {
+    return "openrouter";
+  }
+
+  if (normalizedUrl.includes("api.openai.com") || normalizedName.includes("openai")) {
+    return "openai";
+  }
+
+  return "openai-compatible";
+}
+
+export function assertCompatibleProvider(baseUrl: string, apiKey: string, fallbackName?: string): string | null {
+  const normalizedUrl = normalizeBaseUrl(baseUrl ?? "").toLowerCase();
+  const nextKey = String(apiKey ?? "").trim();
+  const providerKind = inferProviderKind(baseUrl, fallbackName);
+  const looksLikeOpenRouterKey = nextKey.startsWith("sk-or-") || nextKey.startsWith("or-");
+
+  if (providerKind === "openai" && looksLikeOpenRouterKey) {
+    return "This OpenRouter key is configured for the OpenAI endpoint. Set the provider base URL to https://openrouter.ai/api/v1 or provide a valid OpenAI key.";
+  }
+
+  if (providerKind === "openrouter" && normalizedUrl.includes("api.openai.com")) {
+    return "OpenRouter requires the OpenRouter base URL: https://openrouter.ai/api/v1";
+  }
+
+  return null;
+}
+
+export function getFriendlyAiError(status: number, providerLabel?: string): string {
+  const label = providerLabel || "AI provider";
+
+  switch (status) {
+    case 401:
+      return "AI analysis is temporarily unavailable because the AI provider authentication failed.";
+    case 402:
+      return "AI analysis is temporarily unavailable because the AI provider has insufficient credits.";
+    case 429:
+      return "AI analysis is temporarily unavailable because the AI provider rate limit was reached.";
+    default:
+      return `${label} is temporarily unavailable. Please try again later.`;
+  }
+}
+
 export function readSlot(slot: ProviderSlot): SlotConfig {
   const name = process.env[`AI_PROVIDER_${slot}_NAME`] ?? "";
   const baseUrl = normalizeBaseUrl(process.env[`AI_PROVIDER_${slot}_BASE_URL`] ?? "");
@@ -190,6 +237,17 @@ export async function validateProviderConnection(cfg: SlotConfig): Promise<{
     return { ok: false, baseUrl: cfg.baseUrl, name: cfg.name, models: [], error: "Missing base URL or API key." };
   }
 
+  const mismatch = assertCompatibleProvider(cfg.baseUrl, cfg.apiKey, cfg.name);
+  if (mismatch) {
+    return {
+      ok: false,
+      baseUrl: cfg.baseUrl,
+      name: cfg.name,
+      models: cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [],
+      error: mismatch,
+    };
+  }
+
   try {
     const baseUrl = normalizeBaseUrl(cfg.baseUrl);
     const res = await fetch(`${baseUrl}/models`, {
@@ -199,13 +257,13 @@ export async function validateProviderConnection(cfg: SlotConfig): Promise<{
       },
     });
     if (!res.ok) {
-      const body = await res.text();
+      const status = res.status;
       return {
         ok: false,
         baseUrl: cfg.baseUrl,
         name: cfg.name,
         models: cfg.defaultModel ? [fallbackModel(cfg.defaultModel)] : [],
-        error: `Provider rejected the key (${res.status}): ${body.slice(0, 300)}`,
+        error: getFriendlyAiError(status, cfg.name),
       };
     }
 
@@ -240,6 +298,12 @@ export async function completeChat(
       `AI provider slot ${cfg.slot} is not configured. Add its provider name, base URL and API key.`,
     );
   }
+
+  const mismatch = assertCompatibleProvider(cfg.baseUrl, cfg.apiKey, cfg.name);
+  if (mismatch) {
+    throw new Error(mismatch);
+  }
+
   const baseUrl = normalizeBaseUrl(cfg.baseUrl);
   const res = await fetch(`${baseUrl}/chat/completions`, {
     method: "POST",
@@ -257,8 +321,8 @@ export async function completeChat(
     }),
   });
   if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`${cfg.name} request failed [${res.status}]: ${body.slice(0, 400)}`);
+    const status = res.status;
+    throw new Error(getFriendlyAiError(status, cfg.name));
   }
   const json = (await res.json()) as {
     choices?: Array<{ message?: { content?: string } }>;

@@ -18,18 +18,19 @@ function isMissingTableError(error: unknown, tableName: string): boolean {
 }
 
 export const resolveOfficerLogin = createServerFn({ method: "POST" })
-  .inputValidator((input: { email: string }) => ({
-    email: String(input.email ?? "").trim().toLowerCase(),
+  .inputValidator((input: { email?: string; username?: string; identifier?: string }) => ({
+    identifier: String(input.identifier ?? input.username ?? input.email ?? "").trim().toLowerCase(),
   }))
   .handler(async ({ data }) => {
-    if (!data.email) return null;
+    if (!data.identifier) return null;
 
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
 
     const { data: profile, error } = await supabaseAdmin
       .from("profiles")
       .select("id, username, email, role")
-      .eq("email", data.email)
+      .or(`username.eq.${data.identifier},email.eq.${data.identifier}`)
+      .limit(1)
       .maybeSingle();
 
     if (error) {
@@ -47,6 +48,205 @@ export const resolveOfficerLogin = createServerFn({ method: "POST" })
       role: profile.role,
     };
   });
+
+export const analyzeAllIncidents = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const { data: incidents, error } = await context.supabase
+      .from("emergency_requests")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      throw new Error(error.message || "Could not load incidents for analysis.");
+    }
+
+    if (!incidents?.length) {
+      return { ok: true, empty: true, summary: "No incidents are available for analysis." };
+    }
+
+    const fallbackSummary = buildIncidentBatchSummary(incidents);
+    const incidentRefs = incidents.map((incident) => String(incident.ref_code ?? incident.id));
+    const batchActions = buildIncidentBatchActions(incidents);
+    const batchPriority = detectBatchPriority(incidents);
+    const batchId = typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}`;
+
+    const saveBatchResult = async (summary: string, note: string | null, source: "ai" | "fallback") => {
+      const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+      const payload = {
+        request_id: null,
+        batch_id: batchId,
+        analysis_type: "batch",
+        summary,
+        actions: batchActions,
+        resource_allocation: buildIncidentBatchAllocations(incidents),
+        priority: batchPriority,
+        incident_count: incidents.length,
+        incident_refs: incidentRefs,
+        status: source === "ai" ? "completed" : "fallback",
+        created_by: context.userId,
+      };
+
+      const { error: saveError } = await supabaseAdmin.from("response_plans").insert(payload);
+      if (saveError) {
+        console.error("Batch analysis save failed:", saveError.message);
+        throw new Error(saveError.message || "Could not save the combined incident analysis.");
+      }
+
+      return { summary, note };
+    };
+
+    const { data: providerRows } = await context.supabase.from("ai_provider_settings").select("*");
+    const activeSelection = resolveProviderSelection(
+      (providerRows ?? []).map((row) => ({
+        slot: Number(row.slot),
+        active: Boolean(row.active),
+        default_model: typeof row.default_model === "string" ? row.default_model : null,
+      })),
+    );
+
+    const selectedSlot = activeSelection?.slot ?? 1;
+    const selectedRow = (providerRows ?? []).find((row) => Number(row.slot) === selectedSlot);
+    const configured = Boolean((selectedRow?.base_url ?? "") && (selectedRow?.api_key ?? ""));
+    const model = selectedRow?.default_model ?? activeSelection?.model ?? "openrouter/free";
+
+    if (!configured || !model) {
+      const result = await saveBatchResult(fallbackSummary, "AI provider settings are not configured yet, so the batch report was generated from the live incident data only.", "fallback");
+      return { ok: true, empty: false, summary: result.summary, note: result.note };
+    }
+
+    try {
+      const { completeChat, readSlot } = await import("./ai-providers.server");
+      const fallbackSlot = readSlot((selectedSlot as 1 | 2 | 3) ?? 1);
+      const slotCfg = {
+        ...fallbackSlot,
+        name: selectedRow?.name ?? fallbackSlot.name,
+        baseUrl: String(selectedRow?.base_url ?? fallbackSlot.baseUrl ?? "").trim().replace(/\/+$/, ""),
+        apiKey: String(selectedRow?.api_key ?? fallbackSlot.apiKey ?? "").trim(),
+        defaultModel: selectedRow?.default_model ?? fallbackSlot.defaultModel,
+        configured: Boolean((selectedRow?.base_url ?? fallbackSlot.baseUrl ?? "") && (selectedRow?.api_key ?? fallbackSlot.apiKey ?? "")),
+      };
+
+      const prompt = [
+        "You are producing a single combined emergency-response report for the active incident set.",
+        "Return only a concise but complete operational briefing in plain English.",
+        buildIncidentBatchSummary(incidents),
+      ].join("\n\n");
+
+      const rawResult = await completeChat(
+        slotCfg,
+        model,
+        "You are a senior emergency coordinator preparing one combined incident brief.",
+        prompt,
+      );
+
+      const parsedResult = parseBatchResult(rawResult, fallbackSummary);
+      const result = await saveBatchResult(parsedResult, null, "ai");
+      return { ok: true, empty: false, summary: result.summary, note: result.note };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "AI analysis was unavailable for this incident set.";
+      const result = await saveBatchResult(fallbackSummary, message, "fallback");
+      return {
+        ok: true,
+        empty: false,
+        summary: result.summary,
+        note: result.note,
+      };
+    }
+  });
+
+function parseBatchResult(raw: string | null | undefined, fallback: string): string {
+  const value = String(raw ?? "").trim();
+  if (!value) return fallback;
+
+  const withoutFence = value.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const match = withoutFence.match(/\{[\s\S]*\}/);
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[0]) as { summary?: string; overview?: string; message?: string };
+      const summary = parsed.summary ?? parsed.overview ?? parsed.message;
+      if (typeof summary === "string" && summary.trim()) return summary.trim();
+    } catch {
+      // fall through to plain text parsing
+    }
+  }
+
+  return withoutFence || fallback;
+}
+
+function buildIncidentBatchActions(incidents: Array<Record<string, any>>) {
+  const urgent = incidents.filter((incident) => String(incident.severity).toLowerCase() === "critical");
+  const zones = Array.from(new Set(incidents.map((incident) => String(incident.zone ?? "Unassigned"))));
+
+  return [
+    {
+      agent: "coordinator",
+      action: `Prioritize ${urgent.length ? urgent.length : 0} urgent incident(s) and confirm that all critical requests are receiving immediate deployment support.`,
+    },
+    {
+      agent: "logistics",
+      action: `Stage resources toward ${zones.slice(0, 3).join(", ") || "the priority zones"} and confirm capacity across affected sectors.`,
+    },
+    {
+      agent: "medical",
+      action: `Check triage capacity, medical notes, and transport availability for the most severe and vulnerable cases.`,
+    },
+  ];
+}
+
+function detectBatchPriority(incidents: Array<Record<string, any>>) {
+  const severityOrder = { critical: 4, high: 3, moderate: 2, low: 1 } as Record<string, number>;
+  const maximum = incidents.reduce((best, incident) => {
+    const value = severityOrder[String(incident.severity ?? "low").toLowerCase()] ?? 1;
+    return Math.max(best, value);
+  }, 1);
+
+  if (maximum >= 4) return "critical";
+  if (maximum >= 3) return "high";
+  if (maximum >= 2) return "moderate";
+  return "low";
+}
+
+function buildIncidentBatchAllocations(incidents: Array<Record<string, any>>) {
+  const zoneCounts = incidents.reduce<Record<string, number>>((acc, incident) => {
+    const zone = String(incident.zone ?? "Unassigned");
+    acc[zone] = (acc[zone] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  return Object.entries(zoneCounts).map(([zone, count]) => ({
+    zone,
+    quantity: count,
+    item: "incident coverage",
+  }));
+}
+
+function buildIncidentBatchSummary(incidents: Array<Record<string, any>>) {
+  const total = incidents.length;
+  const bySeverity = Object.entries(
+    incidents.reduce<Record<string, number>>((acc, incident) => {
+      const severity = String(incident.severity ?? "low");
+      acc[severity] = (acc[severity] ?? 0) + 1;
+      return acc;
+    }, {}),
+  ).sort((a, b) => b[1] - a[1]);
+  const topZone = incidents
+    .map((incident) => String(incident.zone ?? "Unassigned"))
+    .reduce<Record<string, number>>((acc, zone) => {
+      acc[zone] = (acc[zone] ?? 0) + 1;
+      return acc;
+    }, {});
+  const topZoneEntry = Object.entries(topZone).sort((a, b) => b[1] - a[1])[0];
+  const urgent = incidents.filter((incident) => String(incident.severity).toLowerCase() === "critical");
+
+  return [
+    `Overall incident summary: ${total} active incident(s) are currently in the system.`,
+    `Severity breakdown: ${bySeverity.map(([level, count]) => `${level} (${count})`).join(", ") || "none"}.`,
+    `Most active area: ${topZoneEntry ? `${topZoneEntry[0]} (${topZoneEntry[1]} incident(s))` : "No zone assigned"}.`,
+    `Urgent cases: ${urgent.length ? urgent.map((incident) => incident.ref_code).join(", ") : "none"}.`,
+    `Recommended actions: deploy the nearest available resources to the highest-priority zones, confirm contact details for each incident, and re-check capacity where event load is highest.`,
+  ].join("\n");
+}
 
 /* ------------------------------------------------------------------ public */
 
@@ -72,23 +272,45 @@ export const getDashboard = createServerFn({ method: "GET" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }) => {
     const { supabase, userId } = context;
-    const [requests, resources, officers, configs, plans, roleRes] = await Promise.all([
+    const [requests, resources, officers, configs, plans, roleRes, profileRes] = await Promise.all([
       supabase.from("emergency_requests").select("*").order("created_at", { ascending: false }),
       supabase.from("resources").select("*").order("category"),
       supabase.from("officers").select("*").order("agent_id"),
       supabase.from("agent_configs").select("*"),
       supabase.from("response_plans").select("*").order("created_at", { ascending: false }),
       supabase.from("user_roles").select("role").eq("user_id", userId),
+      supabase.from("profiles").select("username, email, role").eq("id", userId).maybeSingle(),
     ]);
     const roles = (roleRes.data ?? []).map((r) => r.role as string);
+    const profileRole = profileRes.data?.role ?? (roles.includes("coordinator") ? "coordinator" : "officer");
+    const batchAnalysis = (plans.data ?? []).find((plan) => plan.analysis_type === "batch" || plan.batch_id || (!plan.request_id && plan.summary)) ?? null;
     return {
       requests: requests.data ?? [],
       resources: resources.data ?? [],
       officers: officers.data ?? [],
       configs: configs.data ?? [],
       plans: plans.data ?? [],
-      isCoordinator: roles.includes("coordinator"),
+      batchAnalysis,
+      profile: profileRes.data ?? null,
+      isCoordinator: roles.includes("coordinator") || profileRole === "coordinator",
     };
+  });
+
+export const getBatchAnalysis = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const { data, error } = await context.supabase
+      .from("response_plans")
+      .select("*")
+      .or("analysis_type.eq.batch,batch_id.not.is.null")
+      .order("created_at", { ascending: false })
+      .limit(1);
+
+    if (error) {
+      throw new Error(error.message || "Could not load the consolidated incident analysis.");
+    }
+
+    return data?.[0] ?? null;
   });
 
 /** Provider slot status + discovered models. API keys are never returned to the browser. */
@@ -456,6 +678,47 @@ ${(resources ?? []).map((r) => `- ${r.name} | ${r.category} | ${r.available}/${r
     await supabaseAdmin.from("emergency_requests").update({ status: "planned" }).eq("id", req.id);
 
     return { ok: true };
+  });
+
+export const saveResource = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .inputValidator((input: { id?: string; name: string; category: string; quantity: number; available: number; zone?: string; status?: string }) => ({
+    id: String(input.id ?? ""),
+    name: String(input.name ?? "").trim(),
+    category: String(input.category ?? "").trim(),
+    quantity: Number(input.quantity ?? 0),
+    available: Number(input.available ?? 0),
+    zone: String(input.zone ?? "").trim() || null,
+    status: String(input.status ?? "ready").trim() || "ready",
+  }))
+  .handler(async ({ data, context }) => {
+    const normalizedName = data.name;
+    const normalizedCategory = data.category;
+    if (!normalizedName || !normalizedCategory) {
+      throw new Error("Resource name and category are required.");
+    }
+
+    const quantity = Math.max(0, Number(data.quantity) || 0);
+    const available = Math.max(0, Math.min(quantity, Number(data.available) || 0));
+
+    const payload = {
+      name: normalizedName,
+      category: normalizedCategory,
+      quantity,
+      available,
+      zone: data.zone,
+      status: data.status,
+    };
+
+    if (data.id) {
+      const { error } = await context.supabase.from("resources").update(payload).eq("id", data.id);
+      if (error) throw new Error(error.message || "Could not update resource.");
+      return { ok: true, updated: true };
+    }
+
+    const { data: inserted, error } = await context.supabase.from("resources").insert(payload).select("id").single();
+    if (error) throw new Error(error.message || "Could not create resource.");
+    return { ok: true, updated: false, id: inserted?.id ?? null };
   });
 
 export const getRequestDetail = createServerFn({ method: "POST" })

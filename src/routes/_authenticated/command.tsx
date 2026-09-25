@@ -6,12 +6,15 @@ import { supabase } from "@/integrations/supabase/client";
 import { AGENTS } from "@/lib/agent-schema";
 import {
   addOfficer,
+  analyzeAllIncidents,
+  getBatchAnalysis,
   getDashboard,
   getProviderSlots,
   getRequestDetail,
   runCoordination,
   saveAgentConfig,
   saveProviderSettings,
+  saveResource,
   testProviderConnection,
 } from "@/lib/resq.functions";
 
@@ -55,21 +58,35 @@ function Command() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const dashboardFn = useServerFn(getDashboard);
+  const batchFn = useServerFn(getBatchAnalysis);
   const slotsFn = useServerFn(getProviderSlots);
   const detailFn = useServerFn(getRequestDetail);
   const runFn = useServerFn(runCoordination);
+  const analyzeAllFn = useServerFn(analyzeAllIncidents);
   const addOfficerFn = useServerFn(addOfficer);
   const saveConfigFn = useServerFn(saveAgentConfig);
   const saveProviderSettingsFn = useServerFn(saveProviderSettings);
+  const saveResourceFn = useServerFn(saveResource);
   const testProviderFn = useServerFn(testProviderConnection);
 
   const [selected, setSelected] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  const [showResourceEditor, setShowResourceEditor] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [running, setRunning] = useState(false);
   const [providerPreset, setProviderPreset] = useState<string>("custom");
   const [discoveredModels, setDiscoveredModels] = useState<string[]>([]);
+  const [globalBatchReport, setGlobalBatchReport] = useState<{ summary: string; note: string | null } | null>(null);
   const [providerBusy, setProviderBusy] = useState<"validate" | "save" | null>(null);
+  const [resourceForm, setResourceForm] = useState({
+    id: "",
+    name: "",
+    category: "",
+    quantity: "1",
+    available: "1",
+    zone: "",
+    status: "ready",
+  });
   const [providerForm, setProviderForm] = useState({
     slot: 1,
     name: "",
@@ -79,6 +96,7 @@ function Command() {
   });
 
   const dash = useQuery({ queryKey: ["dashboard"], queryFn: () => dashboardFn({}) });
+  const batch = useQuery({ queryKey: ["batch-analysis"], queryFn: () => batchFn({}) });
   const slots = useQuery({ queryKey: ["slots"], queryFn: () => slotsFn({}) });
   const detail = useQuery({
     queryKey: ["detail", selected],
@@ -87,6 +105,7 @@ function Command() {
   });
 
   const d = dash.data;
+  const batchReport = batch.data ?? d?.batchAnalysis ?? null;
   const providerSlotInfo = (slots.data ?? []).find((s) => s.slot === providerForm.slot) ?? (slots.data ?? [])[0];
   const modelOptions = Array.from(new Set([...discoveredModels, ...(providerSlotInfo?.models ?? [])]));
 
@@ -143,7 +162,7 @@ function Command() {
             <div>
               <p className="text-sm font-semibold">ResQ AI · Command Dashboard</p>
               <p className="text-xs opacity-70">
-                {d?.isCoordinator ? "Coordinator access" : "Officer access"} · Regional flood operation
+                {d?.profile?.username ?? "Officer"} · {d?.profile?.role ?? (d?.isCoordinator ? "coordinator" : "officer")} · {d?.isCoordinator ? "Coordinator access" : "Officer access"}
               </p>
             </div>
           </div>
@@ -166,6 +185,62 @@ function Command() {
           <Stat label="Critical" value={counts.critical} tone="text-critical" />
           <Stat label="People affected" value={counts.people} />
           <Stat label="Responders on roster" value={counts.responders} />
+        </section>
+
+        <section className="panel p-5">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <p className="label-cap">Batch incident analysis</p>
+              <h2 className="text-base font-semibold">Combined incident report</h2>
+            </div>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={async () => {
+                  setNotice(null);
+                  try {
+                    const result = await analyzeAllFn({});
+                    setGlobalBatchReport({ summary: result.summary, note: result.note ?? null });
+                    await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+                    await queryClient.invalidateQueries({ queryKey: ["batch-analysis"] });
+                    if (result.empty) {
+                      setNotice("No incidents are available for analysis.");
+                    }
+                  } catch (err) {
+                    setNotice(err instanceof Error ? err.message : "Batch analysis failed.");
+                  }
+                }}
+                className="rounded-sm bg-primary px-3 py-2 text-sm font-semibold text-primary-foreground"
+              >
+                Analyze All Incidents
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const latest = await batchFn({});
+                    setGlobalBatchReport({
+                      summary: latest?.summary ?? "No combined incident report has been generated yet.",
+                      note: latest ? null : "No saved batch analysis found.",
+                    });
+                  } catch (err) {
+                    setNotice(err instanceof Error ? err.message : "Could not load the saved combined report.");
+                  }
+                }}
+                className="rounded-sm border border-border bg-card px-3 py-2 text-sm font-medium"
+              >
+                View Analysis
+              </button>
+            </div>
+          </div>
+          <div className="mt-4 rounded-md border border-border bg-card p-4">
+            <pre className="whitespace-pre-wrap text-sm leading-6">
+              {globalBatchReport?.summary ?? batchReport?.summary ?? "No combined incident report has been generated yet."}
+            </pre>
+            {(globalBatchReport?.note ?? (batchReport ? null : "No saved batch analysis found.")) && (
+              <p className="mt-3 text-xs text-muted-foreground">{globalBatchReport?.note ?? "No saved batch analysis found."}</p>
+            )}
+          </div>
         </section>
 
         <section className="grid gap-6 lg:grid-cols-[1.6fr_1fr]">
@@ -423,37 +498,9 @@ function Command() {
                 </div>
               </div>
 
-              {providerSlotInfo?.modelDetails?.length ? (
-                <div className="mt-4 rounded-md border border-border bg-card p-3">
-                  <p className="label-cap">Detected models</p>
-                  <div className="mt-2 grid gap-2 md:grid-cols-2">
-                    {(providerSlotInfo.modelDetails ?? []).map((model) => (
-                      <button
-                        type="button"
-                        key={model.id}
-                        onClick={() => setProviderForm((prev) => ({ ...prev, defaultModel: model.id }))}
-                        className={`rounded-sm border p-2 text-left text-xs ${
-                          providerForm.defaultModel === model.id
-                            ? "border-primary bg-primary/10"
-                            : "border-border bg-background"
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-semibold">{model.id}</span>
-                          {model.owned_by && <span className="text-muted-foreground">{model.owned_by}</span>}
-                        </div>
-                        <p className="mt-1 text-[11px] text-muted-foreground">
-                          {model.description ?? model.object ?? "Compatible model"}
-                        </p>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                <p className="mt-3 text-xs text-muted-foreground">
-                  Add a valid API key and save to scan the provider catalog for available models.
-                </p>
-              )}
+              <p className="mt-3 text-xs text-muted-foreground">
+                Add a valid API key and save to configure the active provider.
+              </p>
             </>
           ) : (
             <p className="mt-3 text-sm text-muted-foreground">
@@ -579,7 +626,19 @@ function Command() {
 
         <section className="grid gap-6 lg:grid-cols-2">
           <div className="panel p-5">
-            <h2 className="text-base font-semibold">Resources</h2>
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-semibold">Resources</h2>
+              <button
+                type="button"
+                onClick={() => {
+                  setResourceForm({ id: "", name: "", category: "", quantity: "1", available: "1", zone: "", status: "ready" });
+                  setShowResourceEditor(true);
+                }}
+                className="rounded-sm bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground"
+              >
+                Add resource
+              </button>
+            </div>
             <table className="mt-3 w-full text-sm">
               <tbody>
                 {(d?.resources ?? []).map((r) => (
@@ -590,6 +649,26 @@ function Command() {
                       {r.available}/{r.quantity}
                     </td>
                     <td className="py-2 pl-3 text-right text-xs">{r.status}</td>
+                    <td className="py-2 pl-3 text-right">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setResourceForm({
+                            id: r.id,
+                            name: r.name,
+                            category: r.category,
+                            quantity: String(r.quantity ?? 1),
+                            available: String(r.available ?? 0),
+                            zone: r.zone ?? "",
+                            status: r.status ?? "ready",
+                          });
+                          setShowResourceEditor(true);
+                        }}
+                        className="rounded-sm border border-border px-2 py-1 text-xs"
+                      >
+                        Edit
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -678,6 +757,112 @@ function Command() {
               </button>
               <button className="rounded-sm bg-primary px-3 py-1.5 text-sm font-semibold text-primary-foreground">
                 Add agent
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {showResourceEditor && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-navy/60 px-4">
+          <form
+            onSubmit={async (e) => {
+              e.preventDefault();
+              try {
+                await saveResourceFn({
+                  data: {
+                    id: resourceForm.id || undefined,
+                    name: resourceForm.name,
+                    category: resourceForm.category,
+                    quantity: Number(resourceForm.quantity || 0),
+                    available: Number(resourceForm.available || 0),
+                    zone: resourceForm.zone,
+                    status: resourceForm.status,
+                  },
+                });
+                setShowResourceEditor(false);
+                setNotice(resourceForm.id ? "Resource updated." : "Resource added.");
+                await queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+              } catch (err) {
+                setNotice(err instanceof Error ? err.message : "Could not save resource.");
+              }
+            }}
+            className="panel w-full max-w-md p-6"
+          >
+            <h3 className="text-base font-semibold">{resourceForm.id ? "Update resource" : "Add resource"}</h3>
+            <div className="mt-4 grid gap-3">
+              <label className="grid gap-1.5">
+                <span className="label-cap">Name</span>
+                <input
+                  value={resourceForm.name}
+                  onChange={(e) => setResourceForm((prev) => ({ ...prev, name: e.target.value }))}
+                  required
+                  className="rounded-sm border border-input px-3 py-2 text-sm"
+                />
+              </label>
+              <label className="grid gap-1.5">
+                <span className="label-cap">Category</span>
+                <input
+                  value={resourceForm.category}
+                  onChange={(e) => setResourceForm((prev) => ({ ...prev, category: e.target.value }))}
+                  required
+                  className="rounded-sm border border-input px-3 py-2 text-sm"
+                />
+              </label>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="grid gap-1.5">
+                  <span className="label-cap">Quantity</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={resourceForm.quantity}
+                    onChange={(e) => setResourceForm((prev) => ({ ...prev, quantity: e.target.value }))}
+                    className="rounded-sm border border-input px-3 py-2 text-sm"
+                  />
+                </label>
+                <label className="grid gap-1.5">
+                  <span className="label-cap">Available</span>
+                  <input
+                    type="number"
+                    min={0}
+                    value={resourceForm.available}
+                    onChange={(e) => setResourceForm((prev) => ({ ...prev, available: e.target.value }))}
+                    className="rounded-sm border border-input px-3 py-2 text-sm"
+                  />
+                </label>
+              </div>
+              <label className="grid gap-1.5">
+                <span className="label-cap">Zone</span>
+                <input
+                  value={resourceForm.zone}
+                  onChange={(e) => setResourceForm((prev) => ({ ...prev, zone: e.target.value }))}
+                  className="rounded-sm border border-input px-3 py-2 text-sm"
+                />
+              </label>
+              <label className="grid gap-1.5">
+                <span className="label-cap">Status</span>
+                <select
+                  value={resourceForm.status}
+                  onChange={(e) => setResourceForm((prev) => ({ ...prev, status: e.target.value }))}
+                  className="rounded-sm border border-input px-3 py-2 text-sm"
+                >
+                  <option value="ready">ready</option>
+                  <option value="active">active</option>
+                  <option value="deployed">deployed</option>
+                  <option value="maintenance">maintenance</option>
+                </select>
+              </label>
+            </div>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowResourceEditor(false)}
+                className="rounded-sm border border-border px-3 py-1.5 text-sm"
+              >
+                Cancel
+              </button>
+              <button className="rounded-sm bg-primary px-3 py-1.5 text-sm font-semibold text-primary-foreground">
+                {resourceForm.id ? "Save changes" : "Add resource"}
               </button>
             </div>
           </form>

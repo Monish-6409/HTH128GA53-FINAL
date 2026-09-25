@@ -265,29 +265,47 @@ export type Database = {
       response_plans: {
         Row: {
           actions: Json
+          analysis_type: string
+          batch_id: string | null
           created_at: string
+          created_by: string | null
           id: string
+          incident_count: number
+          incident_refs: Json
           priority: string | null
           request_id: string | null
           resource_allocation: Json
+          status: string
           summary: string
         }
         Insert: {
           actions?: Json
+          analysis_type?: string
+          batch_id?: string | null
           created_at?: string
+          created_by?: string | null
           id?: string
+          incident_count?: number
+          incident_refs?: Json
           priority?: string | null
           request_id?: string | null
           resource_allocation?: Json
+          status?: string
           summary: string
         }
         Update: {
           actions?: Json
+          analysis_type?: string
+          batch_id?: string | null
           created_at?: string
+          created_by?: string | null
           id?: string
+          incident_count?: number
+          incident_refs?: Json
           priority?: string | null
           request_id?: string | null
           resource_allocation?: Json
+          status?: string
           summary?: string
         }
         Relationships: [

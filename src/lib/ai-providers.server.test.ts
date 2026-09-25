@@ -2,7 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { ensureContentTypeHeader } from "./response-guard.ts";
-import { normalizeBaseUrl, normalizeModelCatalog, resolveProviderSelection } from "./ai-providers.server.ts";
+import {
+  assertCompatibleProvider,
+  normalizeBaseUrl,
+  normalizeModelCatalog,
+  resolveProviderSelection,
+} from "./ai-providers.server.ts";
 
 test("normalizeModelCatalog preserves model metadata and removes empty ids", () => {
   const result = normalizeModelCatalog({
@@ -34,6 +39,19 @@ test("resolveProviderSelection prefers the active slot and model when provided",
 test("normalizeBaseUrl trims trailing slash so provider endpoints stay valid", () => {
   assert.equal(normalizeBaseUrl("https://api.openai.com/v1/"), "https://api.openai.com/v1");
   assert.equal(normalizeBaseUrl("http://localhost:11434/v1///"), "http://localhost:11434/v1");
+});
+
+test("assertCompatibleProvider rejects an OpenRouter key on an OpenAI endpoint", () => {
+  const result = assertCompatibleProvider("https://api.openai.com/v1", "sk-or-v1-demo-key", "OpenAI");
+
+  assert.match(result ?? "", /OpenRouter/i);
+});
+
+test("assertCompatibleProvider accepts a valid OpenRouter config", () => {
+  assert.equal(
+    assertCompatibleProvider("https://openrouter.ai/api/v1", "sk-or-v1-demo-key", "OpenRouter"),
+    null,
+  );
 });
 
 test("ensureContentTypeHeader adds a content-type header when the Response is missing one", async () => {

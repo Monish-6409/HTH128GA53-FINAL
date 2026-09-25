@@ -38,7 +38,7 @@ export const Route = createFileRoute("/auth")({
 
 function AuthPage() {
   const navigate = useNavigate();
-  const [email, setEmail] = useState("");
+  const [identifier, setIdentifier] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -55,10 +55,10 @@ function AuthPage() {
       return;
     }
 
-    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedIdentifier = identifier.trim().toLowerCase();
 
     try {
-      const account = await resolveOfficerLogin({ data: { email: normalizedEmail } });
+      const account = await resolveOfficerLogin({ data: { identifier: normalizedIdentifier } });
 
       if (!account || !account.email || !['officer', 'coordinator'].includes(account.role)) {
         setError("Incorrect email or password.");
@@ -115,12 +115,13 @@ function AuthPage() {
           <h1 className="mt-1 text-xl font-semibold">Officer / Coordinator sign-in</h1>
           <form onSubmit={onSubmit} className="mt-5 grid gap-4">
             <label className="grid gap-1.5">
-              <span className="label-cap">Email</span>
+              <span className="label-cap">Username or email</span>
               <input
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                autoComplete="email"
+                type="text"
+                value={identifier}
+                onChange={(e) => setIdentifier(e.target.value)}
+                autoComplete="username"
+                placeholder="umar or umar@demo.login"
                 className="w-full rounded-sm border border-input px-3 py-2 text-sm outline-none focus:border-ring focus:ring-1 focus:ring-ring"
               />
             </label>
@@ -143,7 +144,7 @@ function AuthPage() {
             </button>
           </form>
           <p className="mt-5 border-t border-border pt-4 text-xs text-muted-foreground">
-            Use your registered officer or coordinator email and password.
+            Use your registered officer or coordinator username/email and password.
           </p>
         </div>
       </div>
